@@ -1,37 +1,53 @@
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import http from 'http';
-import { Server as SocketIOServer } from 'socket.io';
-import { connectDB } from './config/database.js';
-import { setupSocketEvents } from './services/socketService.js';
-import authRoutes from './routes/auth.js';
-import messageRoutes from './routes/messages.js';
-import adminRoutes from './routes/admin.js';
-import userRoutes from './routes/users.js';
-import moderationRoutes from './routes/moderation.js';
-import { errorHandler } from './middleware/errorHandler.js';
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const cors = require('cors');
+const session = require('express-session');
+const mongoose = require('mongoose');
+const connectDB = require('./config/database');
+const errorHandler = require('./middleware/errorHandler');
+const { generalLimiter } = require('./middleware/rateLimit');
 
-dotenv.config();
+// Import routes
+const authRoutes = require('./routes/auth');
+const messageRoutes = require('./routes/messages');
+const adminRoutes = require('./routes/admin');
+const userRoutes = require('./routes/users');
+const moderationRoutes = require('./routes/moderation');
 
+// Import services
+const socketService = require('./services/socketService');
+const profanityFilter = require('./services/profanityFilter');
+
+// Initialize app
 const app = express();
 const server = http.createServer(app);
-
-// Middleware
-app.use(cors({
-  origin: process.env.SOCKET_CORS_ORIGIN || 'http://localhost:3000',
-  credentials: true
-}));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
-
-// Socket.io setup
-const io = new SocketIOServer(server, {
+const io = socketIo(server, {
   cors: {
     origin: process.env.SOCKET_CORS_ORIGIN || 'http://localhost:3000',
-    credentials: true
-  }
+    methods: ['GET', 'POST'],
+  },
 });
+
+// Middleware
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
+app.use(generalLimiter);
+
+// Session middleware
+app.use(
+  session({
+    secret: process.env.JWT_SECRET,
+    resave: false,
+    saveUninitialized: true,
+    cookie: { secure: process.env.NODE_ENV === 'production' },
+  })
+);
+
+// Connect to database
+connectDB();
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -40,29 +56,85 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/moderation', moderationRoutes);
 
-// Socket.io events
-setupSocketEvents(io);
-
-// Error handler
-app.use(errorHandler);
-
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'Server is running', timestamp: new Date() });
 });
 
-// Connect to database and start server
-const PORT = process.env.PORT || 5000;
+// Socket.io events
+io.on('connection', (socket) => {
+  console.log(`User connected: ${socket.id}`);
 
-connectDB().then(() => {
-  server.listen(PORT, () => {
-    console.log(`🚀 Kanxa Message server running on port ${PORT}`);
-    console.log(`📱 Socket.io ready for real-time messaging`);
-    console.log(`🔐 Admin panel protected with password authentication`);
+  socket.on('userOnline', async (userId) => {
+    await socketService.handleUserOnline(userId, socket);
+    io.emit('userStatusUpdate', {
+      userId,
+      status: 'online',
+      onlineUsers: socketService.getOnlineUsers(),
+    });
   });
-}).catch(err => {
-  console.error('Failed to connect to database:', err);
-  process.exit(1);
+
+  socket.on('userOffline', async (userId) => {
+    await socketService.handleUserOffline(userId);
+    io.emit('userStatusUpdate', {
+      userId,
+      status: 'offline',
+      onlineUsers: socketService.getOnlineUsers(),
+    });
+  });
+
+  socket.on('sendMessage', async (data) => {
+    try {
+      const message = await socketService.saveMessage(data);
+      io.emit('messageReceived', message);
+    } catch (error) {
+      console.error('Error sending message:', error);
+      socket.emit('error', { message: 'Failed to send message' });
+    }
+  });
+
+  socket.on('userTyping', (data) => {
+    io.emit('userTyping', data);
+  });
+
+  socket.on('deleteMessage', async (messageId) => {
+    try {
+      await socketService.deleteMessage(messageId);
+      io.emit('messageDeleted', messageId);
+    } catch (error) {
+      console.error('Error deleting message:', error);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`User disconnected: ${socket.id}`);
+  });
 });
 
-export default { app, server, io };
+// Error handling middleware
+app.use(errorHandler);
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ message: 'Route not found' });
+});
+
+// Start server
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+  console.log(`✅ Server running on http://localhost:${PORT}`);
+  console.log(`📡 Socket.io listening on ws://localhost:${PORT}`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+
+// Handle graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\n🛑 Server shutting down...');
+  server.close(() => {
+    mongoose.connection.close();
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
+
+module.exports = server;

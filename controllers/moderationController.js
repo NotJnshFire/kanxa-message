@@ -1,159 +1,84 @@
-import { Ban } from '../models/Ban.js';
-import { HiddenUser } from '../models/HiddenUser.js';
-import { ProfanityWord } from '../models/ProfanityWord.js';
-import { User } from '../models/User.js';
-import { AdminLog } from '../models/AdminLog.js';
-import { CONSTANTS } from '../config/constants.js';
+const Ban = require('../models/Ban');
+const HiddenUser = require('../models/HiddenUser');
+const ProfanityWord = require('../models/ProfanityWord');
 
-export const getProfanityWords = async (req, res) => {
+const getBans = async (req, res) => {
   try {
-    const { language, limit = 100 } = req.query;
+    const { limit = 50, skip = 0 } = req.query;
+    const bans = await Ban.find()
+      .sort({ bannedAt: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(skip));
 
-    let query = { isActive: true };
-    if (language) {
-      query.language = language;
-    }
-
-    const words = await ProfanityWord.find(query).limit(parseInt(limit));
-
-    res.json({ words });
+    res.json(bans);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching profanity words', error: error.message });
+    res.status(500).json({ message: error.message });
   }
 };
 
-export const addProfanityWord = async (req, res) => {
+const getHiddenUsers = async (req, res) => {
   try {
-    const { word, language, severity } = req.body;
-    const adminId = req.user.userId;
+    const { limit = 50, skip = 0 } = req.query;
+    const hidden = await HiddenUser.find()
+      .sort({ hiddenAt: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(skip));
 
-    // Check if word already exists
+    res.json(hidden);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getProfanityWords = async (req, res) => {
+  try {
+    const { limit = 100, skip = 0 } = req.query;
+    const words = await ProfanityWord.find({ isActive: true })
+      .limit(parseInt(limit))
+      .skip(parseInt(skip));
+
+    res.json(words);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const addProfanityWord = async (req, res) => {
+  try {
+    const { word, severity = 'medium', language = 'en' } = req.body;
+
     const existing = await ProfanityWord.findOne({ word: word.toLowerCase() });
     if (existing) {
-      return res.status(409).json({ message: 'Word already exists' });
+      return res.status(400).json({ message: 'Word already exists' });
     }
 
     const profanityWord = new ProfanityWord({
       word: word.toLowerCase(),
-      language,
       severity,
-      addedBy: adminId
+      language,
     });
 
     await profanityWord.save();
-
-    // Log action
-    await AdminLog.create({
-      adminId,
-      adminEmail: (await User.findById(adminId)).email,
-      action: 'add_profanity_word',
-      details: { word, language, severity },
-      status: 'success'
-    });
-
-    res.status(201).json({
-      message: 'Profanity word added',
-      word: profanityWord
-    });
+    res.status(201).json(profanityWord);
   } catch (error) {
-    res.status(500).json({ message: 'Error adding profanity word', error: error.message });
+    res.status(500).json({ message: error.message });
   }
 };
 
-export const removeProfanityWord = async (req, res) => {
+const removeProfanityWord = async (req, res) => {
   try {
     const { wordId } = req.params;
-    const adminId = req.user.userId;
-
-    const word = await ProfanityWord.findByIdAndUpdate(
-      wordId,
-      { isActive: false },
-      { new: true }
-    );
-
-    if (!word) {
-      return res.status(404).json({ message: 'Word not found' });
-    }
-
-    // Log action
-    await AdminLog.create({
-      adminId,
-      adminEmail: (await User.findById(adminId)).email,
-      action: 'remove_profanity_word',
-      details: { word: word.word },
-      status: 'success'
-    });
-
-    res.json({ message: 'Profanity word removed' });
+    await ProfanityWord.findByIdAndUpdate(wordId, { isActive: false });
+    res.json({ message: 'Word removed' });
   } catch (error) {
-    res.status(500).json({ message: 'Error removing profanity word', error: error.message });
+    res.status(500).json({ message: error.message });
   }
 };
 
-export const getBans = async (req, res) => {
-  try {
-    const { search, limit = 50, skip = 0 } = req.query;
-
-    let query = { isActive: true };
-    if (search) {
-      query = {
-        ...query,
-        $or: [
-          { username: { $regex: search, $options: 'i' } },
-          { userEmail: { $regex: search, $options: 'i' } }
-        ]
-      };
-    }
-
-    const bans = await Ban.find(query)
-      .sort({ banStartDate: -1 })
-      .skip(parseInt(skip))
-      .limit(parseInt(limit))
-      .populate('bannedBy', 'username email');
-
-    const total = await Ban.countDocuments(query);
-
-    res.json({
-      bans,
-      total,
-      skip: parseInt(skip),
-      limit: parseInt(limit)
-    });
-  } catch (error) {
-    res.status(500).json({ message: 'Error fetching bans', error: error.message });
-  }
-};
-
-export const getHiddenUsers = async (req, res) => {
-  try {
-    const { search, limit = 50, skip = 0 } = req.query;
-
-    let query = { isHidden: true };
-    if (search) {
-      query = {
-        ...query,
-        $or: [
-          { username: { $regex: search, $options: 'i' } },
-          { userEmail: { $regex: search, $options: 'i' } }
-        ]
-      };
-    }
-
-    const hidden = await HiddenUser.find(query)
-      .sort({ hiddenAt: -1 })
-      .skip(parseInt(skip))
-      .limit(parseInt(limit))
-      .populate('hiddenBy', 'username email');
-
-    const total = await HiddenUser.countDocuments(query);
-
-    res.json({
-      hidden,
-      total,
-      skip: parseInt(skip),
-      limit: parseInt(limit)
-    });
-  } catch (error) {
-    res.status(500).json({ message: 'Error fetching hidden users', error: error.message });
-  }
+module.exports = {
+  getBans,
+  getHiddenUsers,
+  getProfanityWords,
+  addProfanityWord,
+  removeProfanityWord,
 };

@@ -1,182 +1,107 @@
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import { User } from '../models/User.js';
-import { SecureSettings } from '../models/SecureSettings.js';
+const User = require('../models/User');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 
-export const signup = async (req, res) => {
+const generateToken = (userId) => {
+  return jwt.sign({ userId }, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRY || '7d',
+  });
+};
+
+const signup = async (req, res) => {
   try {
-    const { email, password, username } = req.body;
+    const { username, email, password } = req.body;
 
-    // Check if user already exists
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     if (existingUser) {
-      return res.status(409).json({ message: 'Email or username already exists' });
+      return res.status(400).json({ message: 'User already exists' });
     }
 
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Create user
     const user = new User({
-      email,
-      password: hashedPassword,
       username,
-      displayName: username
+      email,
+      password,
+      authMethod: 'email',
     });
 
     await user.save();
-
-    // Create secure settings
-    const secureSettings = new SecureSettings({ userId: user._id });
-    await secureSettings.save();
-
-    // Generate token
-    const token = jwt.sign(
-      { userId: user._id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE || '7d' }
-    );
+    const token = generateToken(user._id);
 
     res.status(201).json({
       message: 'User created successfully',
-      user: user.toJSON(),
-      token
+      token,
+      user: { id: user._id, username: user.username, email: user.email },
     });
   } catch (error) {
-    res.status(500).json({ message: 'Error creating user', error: error.message });
+    res.status(500).json({ message: error.message });
   }
 };
 
-export const signin = async (req, res) => {
+const signin = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Find user
-    const user = await User.findOne({ email }).select('+password');
+    const user = await User.findOne({ email });
     if (!user) {
-      return res.status(401).json({ message: 'Invalid email or password' });
+      return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    // Check password
-    const isPasswordValid = await bcrypt.compare(password, user.password);
+    const isPasswordValid = await user.comparePassword(password);
     if (!isPasswordValid) {
-      return res.status(401).json({ message: 'Invalid email or password' });
+      return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    // Check if banned
-    if (user.isBanned && user.banUntil > new Date()) {
-      return res.status(403).json({
-        message: 'Your account is banned',
-        banReason: user.banReason,
-        banUntil: user.banUntil
-      });
-    }
-
-    // Generate token
-    const token = jwt.sign(
-      { userId: user._id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE || '7d' }
-    );
-
+    const token = generateToken(user._id);
     res.json({
       message: 'Signed in successfully',
-      user: user.toJSON(),
-      token
+      token,
+      user: { id: user._id, username: user.username, email: user.email },
     });
   } catch (error) {
-    res.status(500).json({ message: 'Error signing in', error: error.message });
+    res.status(500).json({ message: error.message });
   }
 };
 
-export const googleAuth = async (req, res) => {
+const googleAuth = async (req, res) => {
   try {
-    const { googleId, email, displayName, profilePhoto } = req.body;
+    const { googleId, email, username, avatar } = req.body;
 
-    // Find or create user
     let user = await User.findOne({ $or: [{ googleId }, { email }] });
 
     if (!user) {
-      // Generate unique username from email
-      const baseUsername = email.split('@')[0];
-      let username = baseUsername;
-      let counter = 1;
-
-      while (await User.findOne({ username })) {
-        username = `${baseUsername}${counter}`;
-        counter++;
-      }
-
       user = new User({
         googleId,
         email,
-        displayName,
-        username,
-        profilePhoto
+        username: username || email.split('@')[0],
+        avatar,
+        authMethod: 'google',
       });
-
-      await user.save();
-
-      // Create secure settings
-      const secureSettings = new SecureSettings({ userId: user._id });
-      await secureSettings.save();
-    } else if (!user.googleId) {
-      // Link Google account to existing user
-      user.googleId = googleId;
-      user.displayName = displayName;
-      user.profilePhoto = profilePhoto;
       await user.save();
     }
 
-    // Check if banned
-    if (user.isBanned && user.banUntil > new Date()) {
-      return res.status(403).json({
-        message: 'Your account is banned',
-        banReason: user.banReason,
-        banUntil: user.banUntil
-      });
-    }
-
-    // Generate token
-    const token = jwt.sign(
-      { userId: user._id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE || '7d' }
-    );
-
+    const token = generateToken(user._id);
     res.json({
       message: 'Google authentication successful',
-      user: user.toJSON(),
-      token
+      token,
+      user: { id: user._id, username: user.username, email: user.email },
     });
   } catch (error) {
-    res.status(500).json({ message: 'Error with Google authentication', error: error.message });
+    res.status(500).json({ message: error.message });
   }
 };
 
-export const getProfile = async (req, res) => {
+const getProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user.userId);
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    res.json({ user: user.toJSON() });
+    const user = await User.findById(req.userId).select('-password');
+    res.json(user);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching profile', error: error.message });
+    res.status(500).json({ message: error.message });
   }
 };
 
-export const logout = async (req, res) => {
-  try {
-    // Update last seen
-    await User.findByIdAndUpdate(req.user.userId, {
-      isOnline: false,
-      lastSeen: new Date()
-    });
-
-    res.json({ message: 'Logged out successfully' });
-  } catch (error) {
-    res.status(500).json({ message: 'Error logging out', error: error.message });
-  }
+module.exports = {
+  signup,
+  signin,
+  googleAuth,
+  getProfile,
 };
